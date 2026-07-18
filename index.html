@@ -37,6 +37,9 @@
   .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600}
   .pill.present{background:var(--teal-l);color:var(--teal)}
   .pill.absent{background:var(--coral-l);color:var(--coral)}
+  .pill.late{background:var(--amber-l);color:var(--amber)}
+  .pill.excused{background:var(--amber-l);color:var(--amber)}
+  .pill{cursor:pointer}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
   @media(max-width:640px){.grid2{grid-template-columns:1fr}}
   .stat{font-size:28px;font-weight:700}
@@ -76,11 +79,22 @@
           <input type="date" id="scanDate">
         </div>
       </div>
+      <div class="row" style="margin-top:14px">
+        <div style="flex:1;min-width:180px">
+          <label>Mark scans as</label>
+          <select id="scanStatus">
+            <option value="P">Present (P)</option>
+            <option value="L">Late (L)</option>
+            <option value="E">Excused (E)</option>
+          </select>
+        </div>
+      </div>
       <div style="margin-top:14px">
         <label>Scan barcode or type student code, then press Enter</label>
         <input class="scan-input" id="scanInput" placeholder="Waiting for scan…" autocomplete="off">
       </div>
       <div class="flash" id="flash"></div>
+      <p class="small" style="margin-top:10px">Anyone not scanned by end of day counts as Absent (A) automatically. Click a status pill in the tables below to cycle it (P → L → E → A) if you need to fix an entry.</p>
     </div>
 
     <div class="grid2">
@@ -168,9 +182,29 @@ function fullName(s){
 }
 
 let roster = []; // {studentId, surname, firstName, middleName}
-let logs = []; // {code, date, time}  (code === studentId)
+let logs = []; // {code, date, time, status}  (code === studentId; status: 'P'|'L'|'E')
 
 function todayStr(){ return new Date().toISOString().slice(0,10); }
+
+const STATUS_LABEL = {P:'Present', L:'Late', E:'Excused', A:'Absent'};
+const STATUS_CLASS = {P:'present', L:'late', E:'excused', A:'absent'};
+const CYCLE = ['P','L','E','A'];
+
+async function setStatus(studentId, date, newStatus, time){
+  logs = logs.filter(l=>!(l.code===studentId && l.date===date));
+  if(newStatus!=='A'){
+    logs.push({code:studentId, date, time: time || new Date().toLocaleTimeString(), status:newStatus});
+  }
+  await saveLogs();
+  renderAll();
+}
+
+async function cycleStatus(studentId, date){
+  const rec = logs.find(l=>l.code===studentId && l.date===date);
+  const current = rec ? rec.status : 'A';
+  const next = CYCLE[(CYCLE.indexOf(current)+1) % CYCLE.length];
+  await setStatus(studentId, date, next, rec ? rec.time : null);
+}
 
 async function loadData(){
   try{
@@ -225,6 +259,7 @@ document.getElementById('scanDate').addEventListener('change', renderScanTab);
 
 async function handleScan(code){
   const date = document.getElementById('scanDate').value || todayStr();
+  const status = document.getElementById('scanStatus').value || 'P';
   const student = roster.find(s=>s.studentId.toLowerCase()===code.toLowerCase());
   const flash = document.getElementById('flash');
   if(!student){
@@ -238,12 +273,12 @@ async function handleScan(code){
   const time = new Date().toLocaleTimeString();
   if(existing){
     flash.className='flash ok';
-    flash.textContent = name+' already marked present at '+existing.time;
+    flash.textContent = name+' already marked '+STATUS_LABEL[existing.status]+' at '+existing.time;
   }else{
-    logs.push({code:student.studentId, date, time});
+    logs.push({code:student.studentId, date, time, status});
     await saveLogs();
     flash.className='flash ok';
-    flash.textContent = 'Marked present: '+name;
+    flash.textContent = 'Marked '+STATUS_LABEL[status]+': '+name;
   }
   renderScanTab();
 }
@@ -255,10 +290,11 @@ function renderScanTab(){
   let present=0;
   roster.forEach((s,i)=>{
     const rec = logs.find(l=>l.code===s.studentId && l.date===date);
+    const status = rec ? rec.status : 'A';
     if(rec) present++;
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${i+1}</td><td>${fullName(s)}</td><td>${s.studentId}</td>
-      <td><span class="pill ${rec?'present':'absent'}">${rec?'Present':'Absent'}</span></td>
+      <td><span class="pill ${STATUS_CLASS[status]}" onclick="cycleStatus('${s.studentId}','${date}')">${STATUS_LABEL[status]}</span></td>
       <td>${rec?rec.time:'—'}</td>`;
     tbody.appendChild(tr);
   });
@@ -325,41 +361,145 @@ function renderRecords(){
   tbody.innerHTML='';
   roster.forEach((s,i)=>{
     const rec = logs.find(l=>l.code===s.studentId && l.date===date);
+    const status = rec ? rec.status : 'A';
     const tr=document.createElement('tr');
     tr.innerHTML = `<td>${i+1}</td><td>${fullName(s)}</td>
-      <td><span class="pill ${rec?'present':'absent'}">${rec?'Present':'Absent'}</span></td>
+      <td><span class="pill ${STATUS_CLASS[status]}" onclick="cycleStatus('${s.studentId}','${date}')">${STATUS_LABEL[status]}</span></td>
       <td>${rec?rec.time:'—'}</td>`;
     tbody.appendChild(tr);
   });
   const totals = document.getElementById('totalsTable');
   totals.innerHTML='';
   roster.forEach((s,i)=>{
-    const count = logs.filter(l=>l.code===s.studentId).length;
+    const count = logs.filter(l=>l.code===s.studentId && l.status==='P').length;
     const tr=document.createElement('tr');
     tr.innerHTML = `<td>${i+1}</td><td>${fullName(s)}</td><td>${count}</td>`;
     totals.appendChild(tr);
   });
 }
 
-// ---- Export ----
-function exportXlsx(){
-  const dates = [...new Set(logs.map(l=>l.date))].sort();
-  const header = ['No.','Surname','First name','Middle name','Student ID', ...dates, 'Total'];
-  const rows = roster.map((s,i)=>{
-    const row = [i+1, s.surname.toUpperCase(), s.firstName.toUpperCase(), s.middleName?s.middleName.toUpperCase():'', s.studentId];
-    let total=0;
-    dates.forEach(d=>{
-      const present = logs.some(l=>l.code===s.studentId && l.date===d);
-      row.push(present?1:0);
-      if(present) total++;
+// ---- Export (matches the MIS Student Attendance register format) ----
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function monthKeyOf(dateStr){ // dateStr = 'YYYY-MM-DD'
+  const [y,m] = dateStr.split('-');
+  return {key: MONTH_NAMES[parseInt(m,10)-1]+y, y, m, sortKey: y+m};
+}
+
+function col(idx){ return XLSX.utils.encode_col(idx); } // 0-based
+
+function buildMonthSheet(monthLabel, dateList){
+  // dateList: array of 'YYYY-MM-DD' sorted ascending, for this month
+  const numDates = dateList.length;
+  const firstDateCol = 4; // column E (0-based idx 4)
+  const presentColIdx = firstDateCol + numDates;
+  const absentColIdx = presentColIdx + 1;
+  const lateColIdx = presentColIdx + 2;
+  const excusedColIdx = presentColIdx + 3;
+  const remarksColIdx = presentColIdx + 5;
+
+  const aoa = [];
+  const formulas = []; // {addr, f}
+  const [y] = dateList[0].split('-');
+  const monthName = new Date(dateList[0]+'T00:00:00').toLocaleString('en-US',{month:'long'});
+  aoa.push(Array(remarksColIdx+1).fill(null)); aoa[0][3] = `Attendance Register — ${monthName} ${y}`;
+  aoa.push(Array(remarksColIdx+1).fill(null)); aoa[1][3] = 'Codes: P = Present   A = Absent   L = Late   E = Excused';
+  const header = ['Timestamp','No.','studID','Student Name'];
+  dateList.forEach(d=>{ const [,mm,dd]=d.split('-'); header.push(mm+'/'+dd); });
+  header.push('Present','Absent','Late','Excused','Attendance %','Remarks');
+  aoa.push(header);
+
+  roster.forEach((s,i)=>{
+    const rowIdx = aoa.length; // 0-based
+    const r1 = rowIdx+1; // 1-based excel row (after push, this row)
+    const row = [null, i+1, s.studentId, fullName(s)];
+    dateList.forEach(d=>{
+      const rec = logs.find(l=>l.code===s.studentId && l.date===d);
+      row.push(rec ? rec.status : 'A');
     });
-    row.push(total);
-    return row;
+    const dStart = col(firstDateCol)+r1;
+    const dEnd = col(firstDateCol+numDates-1)+r1;
+    const pCell = col(presentColIdx)+r1, aCell = col(absentColIdx)+r1, lCell = col(lateColIdx)+r1, eCell = col(excusedColIdx)+r1;
+    formulas.push({addr: pCell, f: `COUNTIF(${dStart}:${dEnd},"P")`});
+    formulas.push({addr: aCell, f: `COUNTIF(${dStart}:${dEnd},"A")`});
+    formulas.push({addr: lCell, f: `COUNTIF(${dStart}:${dEnd},"L")`});
+    formulas.push({addr: eCell, f: `COUNTIF(${dStart}:${dEnd},"E")`});
+    formulas.push({addr: col(presentColIdx+4)+r1, f: `IFERROR(${pCell}/(${pCell}+${aCell}+${lCell}+${eCell}),0)`});
+    row.push(0,0,0,0,0,null); // placeholders for Present/Absent/Late/Excused/% /Remarks
+    aoa.push(row);
   });
-  const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+
+  // Daily total present row
+  const totalRow = Array(remarksColIdx+1).fill(null);
+  totalRow[3] = 'Daily Total Present';
+  const firstStudentRow1 = 4, lastStudentRow1 = 3+roster.length;
+  const totalR1 = aoa.length+1;
+  dateList.forEach((d,di)=>{
+    const cLetter = col(firstDateCol+di);
+    formulas.push({addr: cLetter+totalR1, f: `COUNTIF(${cLetter}${firstStudentRow1}:${cLetter}${lastStudentRow1},"P")`});
+    totalRow[firstDateCol+di] = 0;
+  });
+  aoa.push(totalRow);
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa, {cellDates:false});
+  formulas.forEach(({addr,f})=>{ if(!ws[addr]) ws[addr]={t:'n',v:0}; ws[addr].f = f; delete ws[addr].v; });
+  ws['!cols'] = [{wch:12},{wch:5},{wch:12},{wch:26}, ...dateList.map(()=>({wch:6})), {wch:8},{wch:8},{wch:6},{wch:9},{wch:12},{wch:22}];
+  ws['!merges'] = [{s:{r:0,c:3},e:{r:0,c:remarksColIdx}},{s:{r:1,c:3},e:{r:1,c:remarksColIdx}}];
+  return {ws, presentColIdx, absentColIdx, lateColIdx, excusedColIdx};
+}
+
+function buildSummarySheet(monthSheetsInfo){
+  // monthSheetsInfo: [{key, presentColIdx, absentColIdx, lateColIdx, excusedColIdx}] in term order
+  const aoa = [];
+  const formulas = [];
+  aoa.push([null,null,null,'Term Summary']);
+  aoa.push([]);
+  aoa.push(['Timestamp','No.','studID','Student Name','Total Present','Total Absent','Total Late','Total Excused','Term Attendance %','Remarks']);
+  const first = monthSheetsInfo[0];
+  roster.forEach((s,i)=>{
+    const r1 = aoa.length+1;
+    const sumFor = (colIdxKey)=> monthSheetsInfo.map(m=>`'${m.key}'!${col(m[colIdxKey])}${r1}`).join('+');
+    formulas.push({addr:`D${r1}`, f:`'${first.key}'!D${r1}`});
+    formulas.push({addr:`E${r1}`, f:sumFor('presentColIdx')});
+    formulas.push({addr:`F${r1}`, f:sumFor('absentColIdx')});
+    formulas.push({addr:`G${r1}`, f:sumFor('lateColIdx')});
+    formulas.push({addr:`H${r1}`, f:sumFor('excusedColIdx')});
+    formulas.push({addr:`I${r1}`, f:`IFERROR(E${r1}/(E${r1}+F${r1}+G${r1}+H${r1}),0)`});
+    aoa.push([null, i+1, s.studentId, '', 0,0,0,0,0, null]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  formulas.forEach(({addr,f})=>{ if(!ws[addr]) ws[addr]={t:'n',v:0}; ws[addr].f = f; delete ws[addr].v; });
+  ws['!cols'] = [{wch:12},{wch:5},{wch:12},{wch:26},{wch:10},{wch:10},{wch:8},{wch:10},{wch:12},{wch:22}];
+  ws['!merges'] = [{s:{r:0,c:3},e:{r:0,c:9}}];
+  return ws;
+}
+
+function exportXlsx(){
+  if(roster.length===0){ alert('Enroll students first.'); return; }
+  const allDates = [...new Set(logs.map(l=>l.date))].sort();
+  if(allDates.length===0){ alert('No scans recorded yet.'); return; }
+
+  const byMonth = {}; // key -> {dates:[], sortKey}
+  allDates.forEach(d=>{
+    const mk = monthKeyOf(d);
+    if(!byMonth[mk.key]) byMonth[mk.key] = {dates:[], sortKey: mk.sortKey};
+    byMonth[mk.key].dates.push(d);
+  });
+  const monthKeys = Object.keys(byMonth).sort((a,b)=> byMonth[a].sortKey.localeCompare(byMonth[b].sortKey));
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Attendance");
-  XLSX.writeFile(wb, "attendance.xlsx");
+  const monthSheetsInfo = [];
+  monthKeys.forEach(key=>{
+    const {ws, presentColIdx, absentColIdx, lateColIdx, excusedColIdx} = buildMonthSheet(key, byMonth[key].dates);
+    XLSX.utils.book_append_sheet(wb, ws, key);
+    monthSheetsInfo.push({key, presentColIdx, absentColIdx, lateColIdx, excusedColIdx});
+  });
+  const summaryWs = buildSummarySheet(monthSheetsInfo);
+  XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
+  // Move Summary to front
+  wb.SheetNames.unshift(wb.SheetNames.pop());
+
+  XLSX.writeFile(wb, "MIS_Student_Attendance.xlsx");
 }
 
 async function resetAll(){
